@@ -40,8 +40,7 @@ TYPE_ADAFRUIT_SNES = const(2)  # 081f:e401 generic SNES layout HID, low-speed
 TYPE_8BITDO_ZERO2  = const(3)  # 2dc8:9018 mini SNES layout, HID over USB-C
 TYPE_XINPUT        = const(4)  # (vid:pid vary) Clones of Xbox360 controller
 TYPE_BOOT_KEYBOARD = const(5)
-TYPE_HID_COMPOSITE = const(6)
-TYPE_POWERA_WIRED  = const(7)  # 20d6:a711 PowerA Wired Controller (for Switch)
+TYPE_POWERA_WIRED  = const(6)  # 20d6:a711 PowerA Wired Controller (for Switch)
 
 # As of CircuitPython 10.0.0-beta.2, there's not a good way to tell if a device
 # has been unplugged. The best we can do is count consecutive timouts during
@@ -99,8 +98,6 @@ def find_usb_device(device_cache):
             return InputDevice(dev, TYPE_POWERA_WIRED, 'PowerAWired', desc)
         elif d_i0 == (0xff, 0xff, 0xff, 0x5d):
             return InputDevice(dev, TYPE_XINPUT, 'XInput', desc)
-        elif d_i0 == (0x00, 0x00, 0x03, 0x00):
-            return InputDevice(dev, TYPE_HID_COMPOSITE, 'HIDComposite', desc)
         elif d_i0 == (0x00, 0x00, 0x03, 0x01):
             return InputDevice(dev, TYPE_BOOT_KEYBOARD, 'BootKeyboard', desc)
         else:
@@ -139,6 +136,7 @@ class InputDevice:
         self.pid = descriptor.idProduct
         self.dev_info = descriptor.dev_class_subclass()
         self.int0_info = descriptor.int_class_subclass(0)
+        self.player = 2 if (device.port_numbers == (2,)) else 1
         # Make sure CircuitPython core is not claiming the device
         interface = 0
         if device.is_kernel_driver_active(interface):
@@ -154,7 +152,7 @@ class InputDevice:
         self.int0_endpoint_out = endpoint_out
         # Initialize USB device if needed (e.g. handshake or set gamepad LEDs)
         if dev_type == TYPE_SWITCH_PRO:
-            self.init_switch_pro_gamepad()
+            self.init_switch_pro_gamepad(self.player)
         elif dev_type == TYPE_ADAFRUIT_SNES:
             pass
         elif dev_type == TYPE_8BITDO_ZERO2:
@@ -162,15 +160,13 @@ class InputDevice:
         elif dev_type == TYPE_POWERA_WIRED:
             pass
         elif dev_type == TYPE_XINPUT:
-            self.init_xinput()
+            self.init_xinput(self.player)
         elif dev_type == TYPE_BOOT_KEYBOARD:
-            pass
-        elif dev_type == TYPE_HID_COMPOSITE:
             pass
         else:
             raise ValueError('Unknown dev_type: %d' % dev_type)
 
-    def init_switch_pro_gamepad(self):
+    def init_switch_pro_gamepad(self, player=1):
         # Prepare Switch Pro compatible gamepad for use.
         # Exceptions: may raise usb.core.USBError and usb.core.USBTimeoutError
         #
@@ -181,6 +177,11 @@ class InputDevice:
         max_packet = min(64, self.int0_endpoint_in.wMaxPacketSize)
         data = bytearray(max_packet)
         data_mv = memoryview(data)
+        # Pick LED byte, default is 1 LED lit for player 1
+        leds = bytes(b'\x01\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x30\x01')
+        if player == 2:
+            leds = bytes(b'\x01\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x30\x03')
+        # Build handshake bytes
         handshake_messages = (
             bytes(b'\x80\x01'),  # get device type and mac address
             bytes(b'\x80\x02'),  # handshake
@@ -189,8 +190,8 @@ class InputDevice:
             bytes(b'\x80\x04'),  # use USB HID only and disable timeout
             # set input report mode to standard
             bytes(b'\x01\x06\x00\x00\x00\x00\x00\x00\x00\x00\x03\x30'),
-            # set player LED1 to on (for LED1+LED2 do 30 03, etc.)
-            bytes(b'\x01\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x30\x01'),
+            # set player LEDs to on (for LED1+LED2 do 30 03, etc.)
+            leds,
             # set home LED
             bytes(b'\x01\x0b\x00\x00\x00\x00\x00\x00\x00\x00\x38\x01\x00\x00\x11\x11'),
         )
@@ -214,7 +215,7 @@ class InputDevice:
                 # before re-appearing in XInput mode with vid:pid 045e:028e.
                 raise ValueError("SwitchPro HANDSHAKE GLITCH (rd)")
 
-    def init_xinput(self):
+    def init_xinput(self, player=1):
         # Prepare XInput gamepad for use.
         # Exceptions: may raise USBError
         out_addr = self.int0_endpoint_out.bEndpointAddress
@@ -225,7 +226,8 @@ class InputDevice:
         data = bytearray(max_packet)
         # Set player number LEDs on XInput gamepad (hardcode to player 1)
         msg = bytes(b'\x01\x03\x02')  # 1 LED
-        #msg = bytes(b'\x01\x03\x03')  # 2 LEDs
+        if player == 2:
+            msg = bytes(b'\x01\x03\x03')  # 2 LEDs
         #msg = bytes(b'\x01\x03\x04')  # 3 LEDs
         #msg = bytes(b'\x01\x03\x05')  # 4 LEDs
         self.device.write(out_addr, msg, timeout=8)
@@ -241,12 +243,10 @@ class InputDevice:
     def input_event_generator(self):
         # This is a generator that makes an iterable for reading input events.
         # - returns: iterable that can be used with a for loop
-        # - yields: (3 possibilities)
+        # - yields: (2 possibilities)
         #   1. Normalized 16-bit integer with XInput style button bitfield
-        #   2. A memoryview(bytearray(...)) with raw or filtered data from
-        #      polling the default endpoint.
-        #   3. None in the case of a timeout or rate limit throttle
-        # Exceptions: may raise USBError
+        #   2. None in the case of a timeout or rate limit throttle
+        # Exceptions: may raise USBError, USBTimeoutError
         #
         dev_type = self.dev_type  # cache this as we use it several times
         int0_gen = self.int0_read_generator  # cache to make shorter lines
@@ -468,10 +468,8 @@ class InputDevice:
                         v |= SELECT
                     yield v
             return normalize_boot_keyboard(int0_gen())
-        elif dev_type == TYPE_HID_COMPOSITE:
-            return int0_gen()
         else:
-            # Don't mess with unknown non-HID devices
+            # Ignore any other devices
             return
 
     def int0_read_generator(self, filter_fn=lambda d: d):
@@ -519,7 +517,7 @@ class InputDevice:
         # device has been unplugged
         timeouts = 0
         max_timeouts = TOO_MANY_GAMEPAD_TIMEOUTS
-        if self.dev_type in (TYPE_BOOT_KEYBOARD, TYPE_HID_COMPOSITE):
+        if self.dev_type == TYPE_BOOT_KEYBOARD:
             max_timeouts = TOO_MANY_KEYBOARD_TIMEOUTS
 
         # Polling loop
