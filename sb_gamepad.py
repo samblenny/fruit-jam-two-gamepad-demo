@@ -50,13 +50,15 @@ TOO_MANY_GAMEPAD_TIMEOUTS = const(99)
 TOO_MANY_KEYBOARD_TIMEOUTS = const(9999)
 
 
-def find_usb_device(player=1):
+def find_usb_device(player=None):
     # Find a USB wired gamepad by inspecting usb device descriptors
-    # - player: can be 1 or 2, used to filter according to Device.port_numbers
+    # - player: can be None, 1, or 2. None finds on all USB ports. 1 finds on
+    #   the root port or port (1,). 2 finds on port (2,).
     # - return: ScanResult object for success or None for failure.
     # Exceptions: may raise USBError, USBTimeoutError, ValueError
     #
     for device in core.find(find_all=True):
+        # Player number filter
         pn = device.port_numbers
         if player == 1 and (pn is not None) and (pn != (1,)):
             # Board has USB hub, but device is not plugged into port 1. That

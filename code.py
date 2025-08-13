@@ -127,7 +127,7 @@ def main():
         set_status("No gamepads...")
         gc.collect()
         try:
-            dev = find_usb_device(player=2)
+            dev = find_usb_device()
             if dev is None:
                 # No connection yet, so sleep briefly then try the find again
                 sleep(0.4)
