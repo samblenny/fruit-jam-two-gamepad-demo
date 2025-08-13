@@ -123,22 +123,19 @@ def main():
         display.refresh()
 
     while True:
-        set_report("Finding gamepad 1...")
+        set_report(None)
+        set_status("Finding gamepad 1...")
         gc.collect()
         device_cache = {}
         try:
-            scan_result = find_usb_device(device_cache)
-            if scan_result is None:
+            dev = find_usb_device(device_cache)
+            if dev is None:
                 # No connection yet, so sleep briefly then try the find again
                 sleep(0.4)
                 continue
-            # Found an input device, so try to configure it and start polling
-            dev = InputDevice(scan_result)
-            sr = scan_result
-            if sr.tag:
-                set_status(sr.tag)
-            else:
-                set_status("%04X:%04X" % (sr.vid, sr.pid))
+            # Found an input device, so update display with device info
+            info = dev.tag if dev.tag else "%04X:%04X" % (dev.vid, dev.pid)
+            set_status(info)
 
             # Poll for input events until USB error
             prev = 0

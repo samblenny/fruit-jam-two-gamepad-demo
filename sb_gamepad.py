@@ -41,8 +41,13 @@ TYPE_8BITDO_ZERO2  = const(3)  # 2dc8:9018 mini SNES layout, HID over USB-C
 TYPE_XINPUT        = const(4)  # (vid:pid vary) Clones of Xbox360 controller
 TYPE_BOOT_KEYBOARD = const(5)
 TYPE_HID_COMPOSITE = const(6)
-TYPE_HID           = const(7)
-TYPE_POWERA_WIRED  = const(9)  # 20d6:a711 PowerA Wired Controller (for Switch)
+TYPE_POWERA_WIRED  = const(7)  # 20d6:a711 PowerA Wired Controller (for Switch)
+
+# As of CircuitPython 10.0.0-beta.2, there's not a good way to tell if a device
+# has been unplugged. The best we can do is count consecutive timouts during
+# calls to usb.core.Device.read() and guess that too many of them means the
+# device was unplugged.
+TOO_MANY_TIMEOUTS = const(30)
 
 
 def find_usb_device(device_cache):
@@ -52,12 +57,19 @@ def find_usb_device(device_cache):
     # Exceptions: may raise USBError, USBTimeoutError, ValueError
     #
     for device in core.find(find_all=True):
-        # Read descriptors to identify devices by type
+        # Read descriptor to identify device by vid:pid or class:subclass
         desc = sb_usb_descriptor.Descriptor(device)
+        # Check for an all zeros descriptor. As of CircuitPython 10.0.0-beta.2,
+        # there's a bug where unplugging a device can cause usb.core.find() to
+        # always generate a device with an invalid descriptor. If that happens,
+        # bail out.
+        desc_bytes = desc.to_bytes()
+        if all((byte_ == 0 for byte_ in desc_bytes)):
+            raise ValueError("usb.core.find() returned all-zeros descriptor")
         # This makes a cache key combining the device's 18 byte descriptor and
         # its port_numbers value. The port numbers indicate which USB port the
-        # device is plugged in to, for using two identical gamepads.
-        k = str(desc.to_bytes()) + str(device.port_numbers)
+        # device is plugged in to. This is meant to help connect two gamepads.
+        k = str(desc_bytes) + str(device.port_numbers)
         if k in device_cache:
             return None
         # Remember this device so we can avoid re-checking its descriptor later
@@ -70,41 +82,30 @@ def find_usb_device(device_cache):
         i0 = desc.int_class_subclass(0)  # interface 0 (class, subclass)
         d_i0 = d + i0                    # both of them in one tuple
         dev = device
+        # Decide if this device is one of the gamepads we have a driver for. If
+        # so, the loop ends here. If not, the loop continues to see if there
+        # are other supported devices.
         if (vid, pid) == (0x057e, 0x2009):
-            return ScanResult(dev, TYPE_SWITCH_PRO, 'SwitchPro', desc)
+            return InputDevice(dev, TYPE_SWITCH_PRO, 'SwitchPro', desc)
         elif (vid, pid) == (0x081f, 0xe401):
             # Generic SNES layout HID gamepad sold by Adafruit
-            return ScanResult(dev, TYPE_ADAFRUIT_SNES, 'AdafruitSNES', desc)
+            return InputDevice(dev, TYPE_ADAFRUIT_SNES, 'AdafruitSNES', desc)
         elif (vid, pid) == (0x2dc8, 0x9018):
             # This one is HID but quirky, so it needs special handling
-            return ScanResult(dev, TYPE_8BITDO_ZERO2, '8BitDoZero2', desc)
+            return InputDevice(dev, TYPE_8BITDO_ZERO2, '8BitDoZero2', desc)
         elif (vid, pid) == (0x20d6, 0xa711):
             # This is for Switch, but it's HID, with 8-bits per axis analog
-            return ScanResult(dev, TYPE_POWERA_WIRED, 'PowerAWired', desc)
+            return InputDevice(dev, TYPE_POWERA_WIRED, 'PowerAWired', desc)
         elif d_i0 == (0xff, 0xff, 0xff, 0x5d):
-            return ScanResult(dev, TYPE_XINPUT, 'XInput', desc)
+            return InputDevice(dev, TYPE_XINPUT, 'XInput', desc)
         elif d_i0 == (0x00, 0x00, 0x03, 0x00):
-            return ScanResult(dev, TYPE_HID_COMPOSITE, 'HIDComposite', desc)
+            return InputDevice(dev, TYPE_HID_COMPOSITE, 'HIDComposite', desc)
         elif d_i0 == (0x00, 0x00, 0x03, 0x01):
-            return ScanResult(dev, TYPE_BOOT_KEYBOARD, 'BootKeyboard', desc)
-        elif i0 == (0x03, 0x00):
-            return ScanResult(dev, TYPE_HID, 'HID', desc)
+            return InputDevice(dev, TYPE_BOOT_KEYBOARD, 'BootKeyboard', desc)
         else:
-            # ignore unknown devices (boot mouse or whatever)
-            return None
+            # Ignore unknown devices
+            continue
     return None
-
-
-class ScanResult:
-    def __init__(self, device, dev_type, tag, descriptor):
-        self.device = device
-        self.dev_type = dev_type
-        self.tag = tag
-        self.descriptor = descriptor
-        self.vid = descriptor.idVendor
-        self.pid = descriptor.idProduct
-        self.dev_info = descriptor.dev_class_subclass()
-        self.int0_info = descriptor.int_class_subclass(0)
 
 
 def elapsed_ms_generator():
@@ -123,17 +124,20 @@ def elapsed_ms_generator():
 
 
 class InputDevice:
-    def __init__(self, scan_result):
+    def __init__(self, device, dev_type, tag, descriptor):
         # Initialize buffers used in polling USB gamepad events
         # - scan_result: a ScanResult instance
         # Exceptions: may raise usb.core.USBError
         #
-        device = scan_result.device
-        dev_type = scan_result.dev_type
         self._prev = 0
         self.buf64 = bytearray(64)
         self.device = device
         self.dev_type = dev_type
+        self.tag = tag
+        self.vid = descriptor.idVendor
+        self.pid = descriptor.idProduct
+        self.dev_info = descriptor.dev_class_subclass()
+        self.int0_info = descriptor.int_class_subclass(0)
         # Make sure CircuitPython core is not claiming the device
         interface = 0
         if device.is_kernel_driver_active(interface):
@@ -141,8 +145,8 @@ class InputDevice:
         # Set configuration
         device.set_configuration(interface)
         # Figure out which endpoints to use
-        int0_ins = scan_result.descriptor.input_endpoints(interface)
-        int0_outs = scan_result.descriptor.output_endpoints(interface)
+        int0_ins = descriptor.input_endpoints(interface)
+        int0_outs = descriptor.output_endpoints(interface)
         endpoint_in  = None if (len(int0_ins) < 1) else int0_ins[0]
         endpoint_out = None if (len(int0_outs) < 1) else int0_outs[0]
         self.int0_endpoint_in = endpoint_in
@@ -161,8 +165,6 @@ class InputDevice:
         elif dev_type == TYPE_BOOT_KEYBOARD:
             pass
         elif dev_type == TYPE_HID_COMPOSITE:
-            pass
-        elif dev_type == TYPE_HID:
             pass
         else:
             raise ValueError('Unknown dev_type: %d' % dev_type)
@@ -434,7 +436,7 @@ class InputDevice:
         # - filter_fn: Optional lambda function to modify raw reports. This is
         #   for slicing off sequence numbers, analog values, or junk bytes.
         # - yields: memoryview of bytes
-        # Exceptions: may raise USBError
+        # Exceptions: may raise USBError, USBTimeoutError
         #
         # Meaning of bInterval depends on negotiated speed:
         # - USB 2.0 spec: 5.6.4 Isochronous Transfer Bus Access Constraints
@@ -470,6 +472,9 @@ class InputDevice:
         poll_dt = elapsed_ms_generator()
         poll_target = (interval * 3) >> 2  # 75% of the max polling interval
 
+        # Counter to track consecutive timeouts as unplug heuristic
+        timeouts = 0
+
         # Polling loop
         while True:
             poll_ms += next(poll_dt)
@@ -495,6 +500,7 @@ class InputDevice:
                 if odd:
                     n = dev_read(in_addr, data_odd, timeout=interval)
                     report = filter_fn(mv_odd[:n])
+                    timeouts = 0
                     if (report is None) or (report == prev_report):
                         yield None
                     else:
@@ -504,6 +510,7 @@ class InputDevice:
                 else:
                     n = dev_read(in_addr, data_even, timeout=interval)
                     report = filter_fn(mv_even[:n])
+                    timeouts = 0
                     if (report is None) or (report == prev_report):
                         yield None
                     else:
@@ -511,8 +518,14 @@ class InputDevice:
                         odd = True
                         yield report
             except USBTimeoutError as e:
-                # This is normal. Timeouts happen fairly often.
-                yield None
+                # This might be okay. Timeouts happen fairly often.
+                timeouts += 1
+                if timeouts > TOO_MANY_TIMEOUTS:
+                    # Too many consecutive timeouts; assume device is unplugged
+                    raise e
+                else:
+                    # Nothing to worry about yet
+                    yield None
             except USBError as e:
                 # This may happen when device is unplugged (not always though)
                 raise e
