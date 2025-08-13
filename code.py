@@ -46,13 +46,13 @@ class GamepadVisualizer:
 
     def __init__(self, display, group):
         # load spritesheet and palette
-        (bitmap, palette) = adafruit_imageload.load("sprites.bmp",
+        (bitmap, palette) = adafruit_imageload.load("sprites2x.bmp",
             bitmap=Bitmap, palette=Palette)
         # assemble TileGrid with gamepad using sprites from the spritesheet
         scene_1 = TileGrid(bitmap, pixel_shader=palette, width=10, height=5,
-            tile_width=8, tile_height=8, default_tile=9, x=8, y=8)
+            tile_width=16, tile_height=16, default_tile=9, x=16, y=16)
         scene_2 = TileGrid(bitmap, pixel_shader=palette, width=10, height=5,
-            tile_width=8, tile_height=8, default_tile=9, x=8, y=128)
+            tile_width=16, tile_height=16, default_tile=9, x=142, y=128)
         tilemap = (
             (0, 5, 2, 3, 3, 3, 3, 4, 5, 6),            # . L . . . . . . R .
             (7, 9, 12, 9, 9, 9, 9, 17, 9, 13),         # . . dU. . . . X . .
@@ -70,13 +70,13 @@ class GamepadVisualizer:
         # Make a text label for status messages
         status_1 = bitmap_label.Label(FONT, text="", color=0xFFFFFF, scale=1)
         status_1.anchor_point = (0, 0)
-        status_1.anchored_position = (8, 54)
+        status_1.anchored_position = (22, 100)
         group.append(status_1)
 
         # Make a separate text label for input event report data
         status_2 = bitmap_label.Label(FONT, text="", color=0xFFFFFF, scale=1)
         status_2.anchor_point = (0, 0)
-        status_2.anchored_position = (8, 174)
+        status_2.anchored_position = (148, 212)
         group.append(status_2)
 
         self.display = display
@@ -142,18 +142,19 @@ class GamepadVisualizer:
 
 
 async def gamepad_loop(gpviz, player=1):
-    # Find a gamepad, poll for input, dispatch events to visualizer
-    sleep = asyncio.sleep
+    # Find a gamepad, poll for input, dispatch events to visualizer.
+    # - gpviz: a GamepadVisualizer instance to receive input events
+    # - player: 1 or 2 (which usb port to use)
     while True:
         if player == 1:
             gc.collect()
         gpviz.set_status("Player %d: [No Controller]" % player, player=player)
-        await sleep(0.002)
+        await asyncio.sleep(0.002)
         try:
             dev = find_usb_device(player=player)
             if dev is None:
                 # No connection yet, so sleep briefly then try the find again
-                await sleep(0.4)
+                await asyncio.sleep(0.4)
                 continue
             # Found an input device, so update display with device info
             info = dev.tag if dev.tag else "%04X:%04X" % (dev.vid, dev.pid)
@@ -164,7 +165,7 @@ async def gamepad_loop(gpviz, player=1):
             for data in dev.input_event_generator():
                 if data is None:
                     # This means polling was rate limited or USB timed out
-                    await sleep(0.001)
+                    await asyncio.sleep(0.001)
                     continue
                 # At this point, data should be a uint16 bitfield
                 diff = prev ^ data
