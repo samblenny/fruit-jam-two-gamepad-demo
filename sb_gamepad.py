@@ -50,13 +50,22 @@ TOO_MANY_GAMEPAD_TIMEOUTS = const(99)
 TOO_MANY_KEYBOARD_TIMEOUTS = const(9999)
 
 
-def find_usb_device(device_cache):
+def find_usb_device(player=1):
     # Find a USB wired gamepad by inspecting usb device descriptors
-    # - device_cache: dictionary of previously checked device descriptors
+    # - player: can be 1 or 2, used to filter according to Device.port_numbers
     # - return: ScanResult object for success or None for failure.
     # Exceptions: may raise USBError, USBTimeoutError, ValueError
     #
     for device in core.find(find_all=True):
+        pn = device.port_numbers
+        if player == 1 and (pn is not None) and (pn != (1,)):
+            # Board has USB hub, but device is not plugged into port 1. That
+            # won't work for Player 1, so skip it.
+            continue
+        if player == 2 and ((pn is None) or (pn != (2,))):
+            # Board doesn't have a USB hub, or it has a hub but the device is
+            # not plugged into port 2. Won't work for Player 2, so skip it.
+            continue
         # Read descriptor to identify device by vid:pid or class:subclass
         desc = sb_usb_descriptor.Descriptor(device)
         # Check for an all zeros descriptor. As of CircuitPython 10.0.0-beta.2,
@@ -66,14 +75,6 @@ def find_usb_device(device_cache):
         desc_bytes = desc.to_bytes()
         if all((byte_ == 0 for byte_ in desc_bytes)):
             raise ValueError("usb.core.find() returned all-zeros descriptor")
-        # This makes a cache key combining the device's 18 byte descriptor and
-        # its port_numbers value. The port numbers indicate which USB port the
-        # device is plugged in to. This is meant to help connect two gamepads.
-        k = str(desc_bytes) + str(device.port_numbers)
-        if k in device_cache:
-            return None
-        # Remember this device so we can avoid re-checking its descriptor later
-        device_cache[k] = True
         # Compare descriptor to known device type fingerprints
         desc.read_configuration(device)
         vid, pid = desc.vid_pid()
