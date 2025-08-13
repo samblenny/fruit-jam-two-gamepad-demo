@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2024 Sam Blenny
 #
+import asyncio
 from board import CKP, CKN, D0P, D0N, D1P, D1N, D2P, D2N
 import displayio
 from displayio import Bitmap, Group, OnDiskBitmap, Palette, TileGrid
@@ -9,7 +10,7 @@ import gc
 import picodvi
 import supervisor
 from terminalio import FONT
-from time import sleep
+import time
 from usb.core import USBError, USBTimeoutError
 import usb_host
 
@@ -48,8 +49,10 @@ class GamepadVisualizer:
         (bitmap, palette) = adafruit_imageload.load("sprites.bmp",
             bitmap=Bitmap, palette=Palette)
         # assemble TileGrid with gamepad using sprites from the spritesheet
-        scene = TileGrid(bitmap, pixel_shader=palette, width=10, height=5,
+        scene_1 = TileGrid(bitmap, pixel_shader=palette, width=10, height=5,
             tile_width=8, tile_height=8, default_tile=9, x=8, y=8)
+        scene_2 = TileGrid(bitmap, pixel_shader=palette, width=10, height=5,
+            tile_width=8, tile_height=8, default_tile=9, x=8, y=128)
         tilemap = (
             (0, 5, 2, 3, 3, 3, 3, 4, 5, 6),            # . L . . . . . . R .
             (7, 9, 12, 9, 9, 9, 9, 17, 9, 13),         # . . dU. . . . X . .
@@ -59,33 +62,35 @@ class GamepadVisualizer:
         )
         for (y, row) in enumerate(tilemap):
             for (x, sprite) in enumerate(row):
-                scene[x, y] = sprite
-        group.append(scene)
+                scene_1[x, y] = sprite
+                scene_2[x, y] = sprite
+        group.append(scene_1)
+        group.append(scene_2)
 
         # Make a text label for status messages
-        status = bitmap_label.Label(FONT, text="", color=0xFFFFFF, scale=1)
-        status.line_spacing = 1.0
-        status.anchor_point = (0, 0)
-        status.anchored_position = (8, 54)
-        group.append(status)
+        status_1 = bitmap_label.Label(FONT, text="", color=0xFFFFFF, scale=1)
+        status_1.anchor_point = (0, 0)
+        status_1.anchored_position = (8, 54)
+        group.append(status_1)
 
         # Make a separate text label for input event report data
-        report = bitmap_label.Label(FONT, text="", color=0xFFFFFF, scale=1)
-        report.line_spacing = 1.0
-        report.anchor_point = (0, 0)
-        report.anchored_position = (8, 54 + (12*4))
-        group.append(report)
+        status_2 = bitmap_label.Label(FONT, text="", color=0xFFFFFF, scale=1)
+        status_2.anchor_point = (0, 0)
+        status_2.anchored_position = (8, 174)
+        group.append(status_2)
 
         self.display = display
         self.group = group
         self.bitmap = bitmap
         self.palette = palette
-        self.scene = scene
+        self.scene_1 = scene_1
+        self.scene_2 = scene_2
         self.tilemap = tilemap
-        self.status = status
-        self.report = report
+        self.status_1 = status_1
+        self.status_2 = status_2
 
-    def input_event(self, buttons, diff, refresh=True):
+
+    def input_event(self, buttons, diff, player=1):
         # Update TileGrid sprites to reflect changed state of gamepad buttons
         # Scene is 10 sprites wide by 5 sprites tall:
         #  Y
@@ -96,7 +101,10 @@ class GamepadVisualizer:
         #  4 . . . . . . . . . .
         #    0 1 2 3 4 5 6 7 8 9 X
         #
-        scene = self.scene
+        if player == 2:
+            scene = self.scene_2
+        else:
+            scene = self.scene_1
         if diff & A:
             scene[8, 2] = 15 if (buttons & A) else 17
         if diff & B:
@@ -121,64 +129,47 @@ class GamepadVisualizer:
             scene[4, 3] = 10 if (buttons & SELECT) else 24
         if diff & START:
             scene[5, 3] = 11 if (buttons & START) else 25
-        if refresh:
-            self.display.refresh()
+        self.display.refresh()
 
-    def set_status(self, msg, refresh=True):
+
+    def set_status(self, msg, player=1):
         # Status label updater
-        self.status.text = msg
-        if refresh:
-            self.display.refresh()
-
-    def set_report(self, data, refresh=True):
-        # Input event report updater
-        if data is None:
-            self.report.text = ''
-        elif isinstance(data, str):
-            self.report.text = data
+        if player == 2:
+            self.status_2.text = msg
         else:
-            msg = ' '.join(['%02x' % b for b in data])
-            self.report.text = msg
-        if refresh:
-            self.display.refresh()
+            self.status_1.text = msg
+        self.display.refresh()
 
 
-def main():
-
-    # Configure display with requested picodvi video mode
-    display = init_display(320, 240, 16)
-    display.auto_refresh = False
-    group = Group(scale=2)  # 2x zoom
-    display.root_group = group
-
-    # This manages all the graphics stuff for the gamepad visualizers
-    gpviz = GamepadVisualizer(display, group)
-
+async def gamepad_loop(gpviz, player=1):
+    # Find a gamepad, poll for input, dispatch events to visualizer
+    sleep = asyncio.sleep
     while True:
-        gpviz.set_report(None, refresh=False)
-        gpviz.set_status("No gamepads...")
-        gc.collect()
+        if player == 1:
+            gc.collect()
+        gpviz.set_status("Player %d: [No Controller]" % player, player=player)
+        await sleep(0.002)
         try:
-            dev = find_usb_device()
+            dev = find_usb_device(player=player)
             if dev is None:
                 # No connection yet, so sleep briefly then try the find again
-                sleep(0.4)
+                await sleep(0.4)
                 continue
             # Found an input device, so update display with device info
             info = dev.tag if dev.tag else "%04X:%04X" % (dev.vid, dev.pid)
-            gpviz.set_status(info)
+            gpviz.set_status("Player %d: %s" % (player, info), player=player)
 
             # Poll for input events until USB exception (device unplug)
             prev = 0
             for data in dev.input_event_generator():
                 if data is None:
                     # This means polling was rate limited or USB timed out
+                    await sleep(0.001)
                     continue
                 # At this point, data should be a uint16 bitfield
                 diff = prev ^ data
                 prev = data
-                gpviz.input_event(data, diff, refresh=False)
-                gpviz.set_report('%04x' % data)
+                gpviz.input_event(data, diff, player=player)
         except USBError as e:
             # This sometimes happens when devices are unplugged.
             print("USBError:", e)
@@ -190,4 +181,21 @@ def main():
             print("ValueError:", e)
 
 
-main()
+async def main():
+    # Configure display with requested picodvi video mode
+    display = init_display(320, 240, 16)
+    display.auto_refresh = False
+    group = Group(scale=1)  # 2x zoom
+    display.root_group = group
+
+    # This manages all the graphics stuff for the gamepad visualizers
+    gpviz = GamepadVisualizer(display, group)
+
+    # Start the 2-player input event loops
+    await asyncio.gather(
+        asyncio.create_task(gamepad_loop(gpviz, player=1)),
+        asyncio.create_task(gamepad_loop(gpviz, player=2)),
+    )
+
+
+asyncio.run(main())
