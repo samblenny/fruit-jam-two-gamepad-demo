@@ -47,7 +47,8 @@ TYPE_POWERA_WIRED  = const(7)  # 20d6:a711 PowerA Wired Controller (for Switch)
 # has been unplugged. The best we can do is count consecutive timouts during
 # calls to usb.core.Device.read() and guess that too many of them means the
 # device was unplugged.
-TOO_MANY_TIMEOUTS = const(30)
+TOO_MANY_GAMEPAD_TIMEOUTS = const(99)
+TOO_MANY_KEYBOARD_TIMEOUTS = const(9999)
 
 
 def find_usb_device(device_cache):
@@ -419,13 +420,55 @@ class InputDevice:
                     yield None if d is None else ((d[1] << 8) | d[0])
             # Filter lambda trims off all the analog stuff
             return normalize_xinput(int0_gen(filter_fn=lambda d: d[2:4]))
-        elif dev_type == TYPE_BOOT_MOUSE:
-            return int0_gen()
         elif dev_type == TYPE_BOOT_KEYBOARD:
-            return int0_gen()
+            # Keyboard to gamepad mapping using US QWERTY layout boot keyboard:
+            #  WASD   =>  d-pad up, left, down, right
+            #  arrows =>  alternate d-pad up, left, down, right
+            #  ZXCV   =>  ABXY cluster buttons (SNES style, A on the right)
+            #  Space  =>  alternate A
+            #  QE     =>  L and R shoulder buttons
+            #  Enter  =>  Start
+            #  Esc    =>  Select
+            def normalize_boot_keyboard(data):
+                for d in data:
+                    if d is None:
+                        yield None
+                        continue
+                    v = 0
+                    # This is a janky keyscan code decoder that only considers
+                    # the first 3 key codes out of 6-key rollover and totally
+                    # ignores all the modifier keys. For d-pad conflicts, up
+                    # and left take priority over down and right.
+                    codes = (d[2], d[3], d[4])
+                    if 0x1a in codes or 0x52 in codes:    # W, up-arrow
+                        v |= UP
+                    elif 0x16 in codes or 0x51 in codes:  # S, down-arrow
+                        v |= DOWN
+
+                    if 0x04 in codes or 0x50 in codes:    # A, left-arrow
+                        v |= LEFT
+                    elif 0x07 in codes or 0x4f in codes:  # D, right-arrow
+                        v |= RIGHT
+
+                    if 0x1d in codes or 0x2c in codes:  # Z, spacebar
+                        v |= A
+                    if 0x1b in codes:  # X
+                        v |= B
+                    if 0x06 in codes:  # C
+                        v |= X
+                    if 0x19 in codes:  # V
+                        v |= Y
+                    if 0x14 in codes:  # Q
+                        v |= L
+                    if 0x08 in codes:  # E
+                        v |= R
+                    if 0x28 in codes:  # Enter
+                        v |= START
+                    if 0x29 in codes:  # Esc
+                        v |= SELECT
+                    yield v
+            return normalize_boot_keyboard(int0_gen())
         elif dev_type == TYPE_HID_COMPOSITE:
-            return int0_gen()
-        elif dev_type == TYPE_HID:
             return int0_gen()
         else:
             # Don't mess with unknown non-HID devices
@@ -472,8 +515,12 @@ class InputDevice:
         poll_dt = elapsed_ms_generator()
         poll_target = (interval * 3) >> 2  # 75% of the max polling interval
 
-        # Counter to track consecutive timeouts as unplug heuristic
+        # Counter and max consecutive timeouts limit for guessing when the USB
+        # device has been unplugged
         timeouts = 0
+        max_timeouts = TOO_MANY_GAMEPAD_TIMEOUTS
+        if self.dev_type in (TYPE_BOOT_KEYBOARD, TYPE_HID_COMPOSITE):
+            max_timeouts = TOO_MANY_KEYBOARD_TIMEOUTS
 
         # Polling loop
         while True:
@@ -518,9 +565,10 @@ class InputDevice:
                         odd = True
                         yield report
             except USBTimeoutError as e:
-                # This might be okay. Timeouts happen fairly often.
+                # This might be okay. Timeouts happen often for some gamepads
+                # and quite a lot (no key pressed) for boot keyboards.
                 timeouts += 1
-                if timeouts > TOO_MANY_TIMEOUTS:
+                if timeouts > max_timeouts:
                     # Too many consecutive timeouts; assume device is unplugged
                     raise e
                 else:

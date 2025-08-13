@@ -124,7 +124,7 @@ def main():
 
     while True:
         set_report(None)
-        set_status("Finding gamepad 1...")
+        set_status("No gamepads...")
         gc.collect()
         device_cache = {}
         try:
