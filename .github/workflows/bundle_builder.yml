@@ -1,0 +1,25 @@
+#{% raw %}  <-- prevent cookiecuttor errors
+name: bundle_builder
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  build_bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch source
+        uses: actions/checkout@v4
+
+      - name: Build and upload project bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          make bundle
+          && gh release upload $GITHUB_REF_NAME build/*.zip
+
+#{% endraw %}  <-- prevent cookiecutter errors
