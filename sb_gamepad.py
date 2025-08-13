@@ -438,11 +438,10 @@ class InputDevice:
                         yield None
                         continue
                     v = 0
-                    # This is a janky keyscan code decoder that only considers
-                    # the first 3 key codes out of 6-key rollover and totally
-                    # ignores all the modifier keys. For d-pad conflicts, up
-                    # and left take priority over down and right.
-                    codes = (d[2], d[3], d[4])
+                    # This is a keyscan code decoder that totally ignores all
+                    # the modifier keys. For d-pad conflicts, up and left take
+                    # priority over down and right.
+                    codes = (d[2], d[3], d[4], d[5], d[6], d[7])
                     if 0x1a in codes or 0x52 in codes:    # W, up-arrow
                         v |= UP
                     elif 0x16 in codes or 0x51 in codes:  # S, down-arrow
